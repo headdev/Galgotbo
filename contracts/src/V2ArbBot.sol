@@ -8,7 +8,7 @@ import "./interface/IWETH.sol";
 import "./interface/IUniswapV2.sol";
 import "./interface/IBalancer.sol";
 
-contract V2ArbBot is IFlashLoanRecipient, IUniswapV2Callee {
+contract Galgobot is IFlashLoanRecipient, IUniswapV2Callee {
     // can perform flashloan, multihop swaps in Uniswap V2 variant pools
     using SafeERC20 for IERC20;
 
