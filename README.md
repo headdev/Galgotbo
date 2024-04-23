@@ -1,10 +1,6 @@
-# MEV templates written in Python, Javascript, and Rust
+# Bot Arbitrage  written in Python, Javascript, and Rust
 
-You can find three MEV templates written in Python/Javascript/Rust here.
-
-The three templates follow a similar design pattern and are written with readability in mind. With the components introduced here, you can easily reproduce most of the MEV strategies known to people: sandwich, frontrunning, arbitrage, sniping, so on and so forth.
-
-The templates all include an example **DEX flashloan arbitrage strategy** to demonstrate how the template can be used. It is a simple demonstration and will need some tweaking to make it work (mostly in regards to order size optimization and gas bidding strategy), though it will work as a real DEX arbitrage bot by doing:
+ (mostly in regards to order size optimization and gas bidding strategy), though it will work as a real DEX arbitrage bot by doing:
 
 - Retrieving all historical events from the blockchain (PairCreated).
 
