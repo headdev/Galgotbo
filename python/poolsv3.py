@@ -1,29 +1,28 @@
-
 import os
 import csv
 import web3
 import json
-
+import certifi
 from tqdm import tqdm
 from enum import Enum
 from web3 import Web3
 from time import sleep
 from random import randint
+import requests
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from constants import *
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+from web3.middleware import geth_poa_middleware
+RATE_LIMIT = 10
 
-RATE_LIMIT = 10  # Limit requests, adjust this to rate limit
-
-
+response = requests.get('https://lively-restless-pond.matic.quiknode.pro/2b6686dcae197a1385f8497ae93d3cfaa79b5d04',  verify=False)
 class DexVariant(Enum):
     UniswapV2 = 2
     UniswapV3 = 3
 
-
-class Pool:
-
+class Poolv3:
     def __init__(self,
                  address: str,
                  version: DexVariant,
@@ -52,20 +51,16 @@ class Pool:
             self.fee,
         ]
 
-
-def fetch_events(params: tuple,
-                 factory_address: str,
-                 v2_factory: web3.contract.Contract):
-    sleep(randint(10, 50) / 100.0)  # Adding some jitter to avoid rate-limiting
+def fetch_events(params: tuple, v3_factory: web3.contract.Contract):
+    sleep(randint(10, 60) / 100.0)
     try:
-        events = v2_factory.events.PoolCreated.get_logs(fromBlock=params[0], toBlock=params[1])
-        return [(factory_address, event) for event in events]
+        events = v3_factory.events.PoolCreated.get_logs(fromBlock=params[0], toBlock=params[1])
+        return [(event.args.pool, event.args.fee, event.args.token0, event.args.token1, event.args.tickSpacing) for event in events]
     except Exception as e:
         print(f'Error fetching events: {e}')
         return []
 
-
-def load_cached_pools() -> Optional[Dict[str, Pool]]:
+def load_cached_pools() -> Optional[Dict[str, Poolv3]]:
     if os.path.exists(CACHED_POOLS_FILE):
         f = open(CACHED_POOLS_FILE, 'r')
         rdr = csv.reader(f)
@@ -75,20 +70,19 @@ def load_cached_pools() -> Optional[Dict[str, Pool]]:
             if row[0] == 'address':
                 continue
             version = DexVariant.UniswapV3 if row[1] == '3' else DexVariant.UniswapV3
-            pool = Pool(address=row[0],
+            poolv3 = Poolv3(address=row[0],
                         version=version,
                         token0=row[2],
                         token1=row[3],
                         decimals0=int(row[4]),
                         decimals1=int(row[5]),
                         fee=int(row[6]))
-            pools[row[0]] = pool
+            pools[row[0]] = poolv3
         logger.info(f'Loaded pools from cache: {CACHED_POOLS_FILE} ({len(pools)} pools)')
 
         return pools
 
-
-def cache_synced_pools(pool: Pool):
+def cache_synced_pools(pool: Poolv3):
     if os.path.exists(CACHED_POOLS_FILE):
         f = open(CACHED_POOLS_FILE, 'r')
         rdr = csv.reader(f)
@@ -107,25 +101,18 @@ def cache_synced_pools(pool: Pool):
     wr.writerow(pool.cache_row())
     f.close()
 
-
-def load_all_pools_from_v2(https_url: str,
-                           factory_addresses: List[str],
-                           from_blocks: List[int],
-                           chunk: int = 100) -> Dict[str, Pool]:
-
-    # Load cached pools
+def load_all_pools_from_v3(HTTPS_URL: str, factory_addresses: List[str], from_blocks: List[int], chunk: int = 100) -> Dict[str, Poolv3]:
     pools = load_cached_pools()
 
-    # If cached pools exist, skip the fetching part
     if pools is not None:
         print("Pools already exist in cache. Skipping fetching.")
         return pools
 
     pools = pools or {}
-    v2_factory_abi = json.load(open(ABI_PATH / 'UniswapV2Factory.json', 'r'))
-    v3_factory_abi = json.load(open(ABI_PATH / 'UniswapV3Factory.json', 'r'))
     erc20_abi = json.load(open(ABI_PATH / 'ERC20.json', 'r'))
-    w3 = Web3(Web3.HTTPProvider(https_url))
+    v3_factory_abi = json.load(open(ABI_PATH / 'UniswapV3Factory.json', 'r'))
+    w3 = Web3(Web3.HTTPProvider(HTTPS_URL, request_kwargs={'verify': False}))
+    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     to_block = w3.eth.get_block_number()
     decimals: Dict[str, int] = {}
 
@@ -141,16 +128,12 @@ def load_all_pools_from_v2(https_url: str,
             request_params = [(block_range[i], block_range[i + 1]) for i in range(len(block_range) - 1)]
 
             for params in request_params:
-                future = executor.submit(fetch_events, params, factory_address, v3_factory)
+                future = executor.submit(fetch_events, params, v3_factory)
                 rate_limit_futures.append(future)
 
         with tqdm(total=len(rate_limit_futures), desc='Processing events', ascii=' =', leave=True) as pbar:
             for future in as_completed(rate_limit_futures):
-                for factory_address, event in future.result():
-                    args = event.args
-                    token0 = args.token0
-                    token1 = args.token1
-
+                for (pool, fee, token0, token1, tick_spacing) in future.result():
                     try:
                         if token0 in decimals:
                             decimals0 = decimals[token0]
@@ -168,32 +151,68 @@ def load_all_pools_from_v2(https_url: str,
                     except Exception as _:
                         continue
 
-                    pool = Pool(address=args.pool,
-                                version=DexVariant.UniswapV3,
-                                token0=args.token0,
-                                token1=args.token1,
-                                decimals0=decimals0,
-                                decimals1=decimals1,
-                                fee=300)
-                    if args.pool not in pools:
-                        pools[args.pool] = pool
-                        cache_synced_pools(pool)
+                    poolv3 = Poolv3(address=pool,
+                                    version=DexVariant.UniswapV3,
+                                    token0=token0,
+                                    token1=token1,
+                                    decimals0=decimals0,
+                                    decimals1=decimals1,
+                                    fee=fee)
+                    if poolv3 not in pools:
+                        pools[poolv3.address] = poolv3
+                        cache_synced_pools(poolv3)
 
                 pbar.update(1)
 
     return pools
 
-
 if __name__ == '__main__':
-    """
-    Example code can be run on Ethereum
-    """
     factory_addresses = [
-        '0x1F98431c8aD98523631AE4a59f267346ea31F984', # Uniswap v2
+        '0x1F98431c8aD98523631AE4a59f267346ea31F984',
     ]
     factory_blocks = [
         55859483,
     ]
 
-    pools = load_all_pools_from_v2(HTTPS_URL, factory_addresses, factory_blocks, 1000)
+    v3_factory_abi = [
+        {
+            "anonymous": false,
+            "inputs": [
+                {
+                    "indexed": true,
+                    "internalType": "uint24",
+                    "name": "fee",
+                    "type": "uint24"
+                },
+                {
+                    "indexed": true,
+                    "internalType": "address",
+                    "name": "token0",
+                    "type": "address"
+                },
+                {
+                    "indexed": true,
+                    "internalType": "address",
+                    "name": "token1",
+                    "type": "address"
+                },
+                {
+                    "indexed": false,
+                    "internalType": "int24",
+                    "name": "tickSpacing",
+                    "type": "int24"
+                },
+                {
+                    "indexed": false,
+                    "internalType": "address",
+                    "name": "pool",
+                    "type": "address"
+                }
+            ],
+            "name": "PoolCreated",
+            "type": "event"
+        }
+    ]
+
+    pools = load_all_pools_from_v3(HTTPS_URL, factory_addresses, factory_blocks, 1000)
     print(pools)

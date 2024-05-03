@@ -13,7 +13,7 @@ eth-abi
 # the below won't work
 # remove from requirements.txt and manually install
 # with the same version, or the code won't work
-web3==5.31.0
-multicall==0.7.7
+#web3==5.31.0
+#multicall==0.7.7
 
 # run pip install --upgrade websockets after completion
