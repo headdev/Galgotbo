@@ -12,7 +12,7 @@ target/
 docs/
 
 # Dotenv file
-.env
+
 
 # Pycharm
 .idea/
